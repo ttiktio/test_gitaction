@@ -1,0 +1,63 @@
+name: Run Shop Voucher Monitor
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      category_filter:
+        description: 'Filter Category (optional, default: all)'
+        required: false
+        default: 'all'
+      shop_filter:
+        description: 'Filter Shop Username (optional, default: all)'
+        required: false
+        default: 'all'
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Execute Shop Voucher Monitor
+        env:
+          SHOPEE_SHOP_URLS: ${{ secrets.SHOPEE_SHOP_URLS }}
+          BYPASS_SSL_VERIFY: "true"
+        run: |
+          echo "=========================================="
+          echo "Starting Shop Voucher Monitor Scan..."
+          echo "=========================================="
+          
+          # Run python script and capture output
+          python shop_voucher_monitor.py --format text --force-refresh --category "${{ github.event.inputs.category_filter || 'all' }}" --shop "${{ github.event.inputs.shop_filter || 'all' }}" > result.txt
+          
+          # Output to job log
+          cat result.txt
+
+          # Format nicely for GitHub Job Summary page
+          echo "## 🛍️ Shop Voucher Monitor Execution Result" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          cat result.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Scan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voucher-scan-report
+          path: |
+            result.txt
+            .shop_vouchers_cache.json
+          if-no-files-found: ignore

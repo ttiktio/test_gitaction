@@ -1,0 +1,5 @@
+.shop_vouchers_cache.json
+result.txt
+__pycache__/
+*.pyc
+.env
