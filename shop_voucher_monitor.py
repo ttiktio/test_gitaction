@@ -73,11 +73,11 @@ BUILTIN_SHOPEE_SHOP_URLS = (
     ),
 )
 DEFAULT_SHOPEE_SHOP_URLS = tuple(
-    target.strip()
+    target.strip().lstrip("\ufeff")
     for target in os.environ.get(
         "SHOPEE_SHOP_URLS", ",".join(BUILTIN_SHOPEE_SHOP_URLS)
     ).split(",")
-    if target.strip()
+    if target.strip().lstrip("\ufeff")
 )
 SSL_CONTEXT = None
 if os.environ.get("BYPASS_SSL_VERIFY", "false").lower() in ("true", "1", "yes"):
@@ -904,7 +904,7 @@ class ShopeeVoucherFetchError(RuntimeError):
 
 
 def _resolve_shopee_shop_target(url_or_username):
-    raw_target = str(url_or_username or "").strip()
+    raw_target = str(url_or_username or "").strip().lstrip("\ufeff")
     if not raw_target:
         raise ShopeeVoucherFetchError("ไม่ได้ระบุ URL หรือ username ของร้าน Shopee")
 
@@ -933,7 +933,7 @@ def _resolve_shopee_shop_target(url_or_username):
 
 
 def _extract_shopee_category_id(url_or_username):
-    raw_target = str(url_or_username or "").strip()
+    raw_target = str(url_or_username or "").strip().lstrip("\ufeff")
     if not raw_target.lower().startswith(("http://", "https://")):
         return ""
     try:
@@ -1248,9 +1248,9 @@ def fetch_active_shop_vouchers(force_refresh=False, category_filter=None, shop_f
 
     explicit_targets = url is not None
     if isinstance(url, (list, tuple, set)):
-        targets = [str(target).strip() for target in url if str(target).strip()]
+        targets = [str(target).strip().lstrip("\ufeff") for target in url if str(target).strip().lstrip("\ufeff")]
     elif url:
-        targets = [str(url).strip()]
+        targets = [str(url).strip().lstrip("\ufeff")]
     else:
         targets = list(DEFAULT_SHOPEE_SHOP_URLS)
 
