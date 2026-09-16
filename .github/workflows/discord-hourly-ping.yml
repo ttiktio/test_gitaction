@@ -1,0 +1,57 @@
+name: Discord Hourly Time Ping
+
+# Fires every hour and reports to Discord how far the actual start time drifted
+# from the scheduled cron slot. GitHub queues scheduled runs on a shared pool,
+# so a few minutes of lag is normal and worth measuring.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: discord-hourly-ping
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Send Time Report to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SCHEDULE_CRON: '0 * * * *'
+          DELAY_LOG: logs/run_delays.csv
+        run: python discord_time_ping.py
+
+      - name: Commit Delay Log
+        if: github.event_name == 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        continue-on-error: true
+        run: |
+          if [ -z "$(git status --porcelain logs/run_delays.csv)" ]; then
+            echo "No log change to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add logs/run_delays.csv
+          git commit -m "chore: log scheduled run delay for run #${GITHUB_RUN_NUMBER}"
+          # Another hourly run may have pushed first; rebase before retrying.
+          for attempt in 1 2 3; do
+            if git push; then exit 0; fi
+            sleep $((attempt * 3))
+            git pull --rebase --autostash
+          done
+          git push
