@@ -8,12 +8,17 @@ a Discord webhook so the drift can be tracked over time.
 
 Three timestamps are compared:
 
-  scheduled : the cron slot this run belongs to (e.g. 14:00:00 UTC)
+  scheduled : the hour slot this run belongs to (e.g. 14:00:00 UTC)
   queued    : when GitHub actually created the workflow run
   executed  : when this script runs (queued + runner startup + setup steps)
 
 Delays are scheduled -> queued (GitHub's own scheduling lag) and
 scheduled -> executed (the total lag before real work happens).
+
+GitHub also drops scheduled triggers outright when it is busy, and never
+replays them, so the workflow fires several times an hour as retries. With
+--once-per-slot the run stays silent if the CSV log already holds a row for the
+current hour, which keeps the report at one message per hour.
 """
 
 from __future__ import annotations
@@ -51,21 +56,6 @@ CSV_FIELDS = [
 # --------------------------------------------------------------------------- #
 # time helpers
 # --------------------------------------------------------------------------- #
-
-def parse_cron_minute(cron: str) -> int:
-    """Return the minute a cron expression fires on.
-
-    Only the shapes this project uses are handled: a literal minute ("0 * * * *")
-    or a step ("*/15 * * * *", treated as firing on minute 0 of each hour block).
-    Anything else falls back to minute 0, which matches the workflow default.
-    """
-    field = (cron or "").strip().split(" ")[0] if cron else "0"
-    if field.isdigit():
-        return int(field) % 60
-    if field.startswith("*/") and field[2:].isdigit():
-        return 0
-    return 0
-
 
 def scheduled_slot(reference: datetime, cron_minute: int) -> datetime:
     """The most recent cron slot at or before ``reference``."""
@@ -148,14 +138,13 @@ def run_url() -> str | None:
 # report
 # --------------------------------------------------------------------------- #
 
-def build_report(cron: str) -> dict:
+def build_report(target_minute: int, label: str) -> dict:
     executed = datetime.now(timezone.utc).replace(microsecond=0)
     queued = fetch_run_created_at()
-    cron_minute = parse_cron_minute(cron)
 
     # Anchor the slot on the queue time when we know it: a very late run could
     # otherwise be attributed to the wrong hour.
-    scheduled = scheduled_slot(queued or executed, cron_minute)
+    scheduled = scheduled_slot(queued or executed, target_minute)
 
     return {
         "scheduled": scheduled,
@@ -163,7 +152,7 @@ def build_report(cron: str) -> dict:
         "executed": executed,
         "queue_delay": (queued - scheduled) if queued else None,
         "total_delay": executed - scheduled,
-        "cron": cron,
+        "cron": label,
     }
 
 
@@ -209,6 +198,8 @@ def build_embed(report: dict) -> dict:
     fields.append({"name": "⏱️ ดีเลย์", "value": "\n".join(delay_lines), "inline": False})
 
     meta = [f"cron: `{report['cron']}`", f"event: `{event}`"]
+    if report["queued"]:
+        meta.append(f"ยิงติดรอบนาทีที่ `:{report['queued'].minute:02d}`")
     if os.environ.get("GITHUB_RUN_NUMBER"):
         meta.append(
             f"run #{os.environ['GITHUB_RUN_NUMBER']}"
@@ -251,6 +242,26 @@ def send_to_discord(webhook: str, embed: dict) -> None:
         raise SystemExit(f"[error] Discord rejected the message ({exc.code}): {detail}")
     except urllib.error.URLError as exc:
         raise SystemExit(f"[error] could not reach Discord: {exc.reason}")
+
+
+def slot_already_logged(path: str, slot: datetime) -> bool:
+    """True if a ping for this hour slot was already recorded.
+
+    The CSV is committed back to the repo, so it doubles as the memory that lets
+    the extra cron attempts stay quiet once the hour has been covered. A read
+    failure answers False: a duplicate ping beats a silently missed hour.
+    """
+    if not path or not os.path.exists(path):
+        return False
+    target = slot.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            return any(
+                row.get("scheduled_utc") == target for row in csv.DictReader(handle)
+            )
+    except Exception as exc:
+        print(f"[warn] could not read {path}: {exc}", file=sys.stderr)
+        return False
 
 
 def append_csv(path: str, report: dict) -> None:
@@ -308,9 +319,20 @@ def write_summary(report: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--cron",
+        "--target-minute",
+        type=int,
+        default=int(os.environ.get("TARGET_MINUTE", "0") or 0),
+        help="the minute past the hour the ping is meant to land on (default: 0)",
+    )
+    parser.add_argument(
+        "--schedule-label",
         default=os.environ.get("SCHEDULE_CRON", "0 * * * *"),
-        help="cron expression the workflow is scheduled with (default: hourly)",
+        help="cron expression shown in the report (display only)",
+    )
+    parser.add_argument(
+        "--once-per-slot",
+        action="store_true",
+        help="stay quiet if this hour was already pinged (schedule events only)",
     )
     parser.add_argument(
         "--csv",
@@ -324,7 +346,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    report = build_report(args.cron)
+    report = build_report(args.target_minute % 60, args.schedule_label)
+
+    # The workflow fires several times an hour so a dropped trigger does not cost
+    # the whole hour. Only the first attempt that gets through reports anything.
+    if (
+        args.once_per_slot
+        and os.environ.get("GITHUB_EVENT_NAME") == "schedule"
+        and slot_already_logged(args.csv, report["scheduled"])
+    ):
+        print(
+            f"slot {report['scheduled']:%Y-%m-%d %H:%M} UTC is already covered -- "
+            "this is a retry attempt, nothing to send."
+        )
+        return 0
+
     embed = build_embed(report)
 
     print(f"scheduled : {report['scheduled']}")
